@@ -157,7 +157,17 @@ already-deployed contract. Redeploying to pick up the fix has not been done.
 
 ## Frontend
 
-Not built in this pass.
+A live read-and-write console is built in `web/` (Vite + React + wagmi/viem +
+RainbowKit). It reads all state from Unichain Sepolia directly — contract
+state via multicall, pool price via `extsload` on the packed `Slot0`, history
+via `eth_getLogs` — and supports the full searcher bond lifecycle and LP
+insurance claims from a connected wallet. See `web/README.md`.
+
+Deliberately not in it yet: a swap UI (searchers/victims still act via
+scripts or their own contracts), a redeploy against the current `src/` vault
+(the console ships the deployed pre-`LIQUIDITY_MATURATION_BLOCKS` ABIs), and
+any indexer — the log scan runs client-side against the public RPC, so it
+slows as the chain grows without a dedicated endpoint.
 
 ## What would change first in a production hardening pass
 
@@ -166,4 +176,5 @@ invariant suite over `ThetaBGHook` itself (swap-driven attacks, liquidity
 changes, and slashes through one randomized handler), (3) per-pool-fixed-
 at-init economic parameters, (4) gas optimization pass with a checked-in
 gas report, (5) redeploy to pick up the flash-liquidity-at-slash fix on the
-live Unichain Sepolia instance, which still runs the pre-fix bytecode.
+live Unichain Sepolia instance, which still runs the pre-fix bytecode (the
+`web/` console would then need its vault ABI regenerated to match).

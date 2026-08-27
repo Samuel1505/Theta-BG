@@ -81,6 +81,8 @@ Contracts and tests are real and passing against actual `v4-core` /
 `v4-periphery` / OpenZeppelin dependencies (see `remappings.txt`). **Live on
 Unichain Sepolia** — see `DEPLOYMENT.md` for verified contract addresses and
 a real, on-chain sandwich detection + slash at production thresholds
-(transaction hashes included). An early-stage frontend scaffold exists in
-`web/` (Vite + React + TypeScript, not yet built out) — see `LIMITATIONS.md`
-for the full list of what's deliberately deferred.
+(transaction hashes included). A live read-and-write console is built in
+`web/` (Vite + React + wagmi/viem + RainbowKit) — it reads all state from
+chain and drives the searcher bond lifecycle and LP insurance claims from a
+connected wallet. See `web/README.md`, and `LIMITATIONS.md` for what's
+deliberately deferred.
