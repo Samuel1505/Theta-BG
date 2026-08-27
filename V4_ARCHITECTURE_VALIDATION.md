@@ -156,17 +156,17 @@ rules this out, correctly).
 
 **Compatible?** Yes, using the same accounting pattern Uniswap itself uses
 for swap fees: a **global reward-per-liquidity accumulator**, updated at
-each slash using `StateLibrary.getLiquidity()` as the divisor (the
-in-range liquidity actually exposed to that swap's price impact), with
-**per-position checkpoints** settled whenever a position's liquidity
-changes.
+each slash using the vault's own internally-tracked *mature* liquidity as
+the divisor (not a live `StateLibrary.getLiquidity()` read — see the
+maturation discussion below), with **per-position checkpoints** settled
+whenever a position's liquidity changes.
 
 **Implementation decision.**
 - `accInsurancePerLiquidityX128` (per pool) increases on every slash by
-  `insuranceShare * Q128 / activeLiquidityAtSlash`. If
-  `activeLiquidityAtSlash == 0` (no in-range liquidity), the insurance share
-  is still deposited into the vault as principal but is not distributed via
-  the accumulator — see `LIMITATIONS.md` for this edge case.
+  `insuranceShare * Q128 / poolEligibleLiquidity`. If
+  `poolEligibleLiquidity == 0` (no mature in-range liquidity), the insurance
+  share is still deposited into the vault as principal but is not
+  distributed via the accumulator — see `LIMITATIONS.md` for this edge case.
 - `ThetaBGHook` adds `afterAddLiquidity: true` and `afterRemoveLiquidity: true`
   permissions **not present in the brief's permission list** — required to
   checkpoint a position's `rewardDebt` and settle its accrued-but-unclaimed
@@ -178,14 +178,36 @@ changes.
   build brief).
 - `claimInsuranceYield(poolKey, tickLower, tickUpper, salt)` settles and
   pays out a specific position's accrued share. No LP array, no iteration.
-- **Known residual risk** (documented, not silently mitigated): an LP who
-  adds a large position in the same block as — but strictly before — a
-  slash-triggering back-run transaction, then removes it shortly after, can
-  claim a share of that one slash despite near-zero holding duration
-  ("flash-LP at slash" — brief §53). A full fix needs time-weighted or
-  one-block-delayed eligibility; the hackathon build documents this in
-  `SECURITY.md`/`LIMITATIONS.md` rather than shipping a partially-verified
-  snapshot system.
+- **Flash-LP-at-slash — resolved, not a residual risk.** An LP who adds a
+  large position in the same block as — but strictly before — a
+  slash-triggering back-run transaction, then removes it shortly after,
+  used to be able to claim a share of that one slash despite near-zero
+  holding duration ("flash-LP at slash" — brief §53). This is now closed by
+  a one-block liquidity maturation delay (`LIQUIDITY_MATURATION_BLOCKS`):
+  `LPInsuranceVault` tracks `eligibleLiquidity` (mature) separately from
+  `pendingLiquidity` (added this block, not yet mature), both per-position
+  and pool-wide. Freshly-added liquidity contributes nothing to a slash's
+  divisor until it matures, and — the subtler half of the fix — a
+  position's own `rewardDebtX128` checkpoint cannot retroactively claim
+  credit for a slash that happened before its liquidity matured, because
+  `_syncPosition` settles the pre-maturity and post-maturity portions of
+  the accumulator's movement separately, splitting exactly at the position's
+  maturity block. Doing that split correctly requires knowing the
+  accumulator's value at an arbitrary past block, not just its current
+  value — so the vault keeps an append-only `slashHistory` checkpoint list
+  (bounded by the number of successful attacks, not by swap volume) and
+  binary-searches it (`_accBeforeBlock`). A simpler single `lastSlashBlock`
+  scalar was tried first and found insufficient: once two slashes land
+  between two touches of the same position, comparing only against the
+  *most recent* slash's block wrongly credits a position for an earlier
+  slash it wasn't yet eligible for, which is a genuine solvency violation,
+  not just an imprecision — caught by `LPInsuranceVaultInvariantTest`'s
+  fuzzer, not by inspection. Verified end to end by
+  `test/ThetaBGAdversarial.t.sol::test_attack_flashLiquidityAtSlash_noLongerCapturesShareDespiteInstantExit`
+  and by both `LPInsuranceVaultInvariantTest` invariants holding across
+  128,000 randomized calls each, including block-advancing and
+  multi-slash-straddling sequences. See `SECURITY.md` §"LP" and
+  `MECHANISM.md` for more detail.
 
 ---
 

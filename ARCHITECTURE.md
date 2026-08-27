@@ -106,18 +106,28 @@ identically-sized ordinary swap.
 
 ```
 afterAddLiquidity / afterRemoveLiquidity:
-  liquidityAfter  = StateLibrary.getPositionInfo(poolId, owner, tickLower, tickUpper, salt).liquidity
-  liquidityBefore = liquidityAfter - params.liquidityDelta   // signed; reverts if this underflows/overflows uint128
-  vault.checkpoint(owner, tickLower, tickUpper, salt, liquidityBefore)
-    -> settles this position's accrued reward at its OLD liquidity
+  vault.checkpoint(owner, tickLower, tickUpper, salt, params.liquidityDelta)
+    -> _syncPosition: settles this position's accrued reward, split precisely
+       at its maturity boundary if pending liquidity has since matured
+       (via slashHistory + binary search — see below)
+    -> _syncPool: promotes the pool-wide pending liquidity the same way
+    -> _settleOwed: pays out any remaining accrued-but-not-yet-owed delta
+    -> applies liquidityDelta to pendingLiquidity (not eligibleLiquidity),
+       both per-position and pool-wide, with a fresh pendingBlock
     -> resets rewardDebt to the current global accumulator
 ```
 
-This is the standard MasterChef/Synthetix "sync before mutate" reward
-pattern, necessary because `StateLibrary` gives no way to enumerate
-positions or be notified retroactively — see
-`V4_ARCHITECTURE_VALIDATION.md §4` for why this, and not a naive
-"read current liquidity at claim time," is required.
+`LPInsuranceVault` no longer reads live liquidity from `StateLibrary` at
+all for this bookkeeping — it trusts its own internal
+`eligibleLiquidity`/`pendingLiquidity` split, keyed by
+`LIQUIDITY_MATURATION_BLOCKS`. This is the standard MasterChef/Synthetix
+"sync before mutate" reward pattern, extended with a maturation delay so
+that liquidity only starts earning (or diluting) a slash's share once it
+has been held at least one block — see `V4_ARCHITECTURE_VALIDATION.md §4`
+and `SECURITY.md` §"LP" for why a naive "read current liquidity at slash
+time" divisor is exploitable by flash liquidity, and why the fix needs an
+append-only slash-checkpoint history rather than a single "last slash
+block" scalar.
 
 ## What is immutable vs. what nothing controls
 

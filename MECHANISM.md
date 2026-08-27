@@ -148,20 +148,38 @@ a balance check.
 ### Distribution: reward-per-liquidity accumulator, not LP enumeration
 
 See `V4_ARCHITECTURE_VALIDATION.md §4` for the full derivation. In one line:
-`accInsurancePerLiquidityX128 += slashAmount * Q128 / activeLiquidityAtSlash`,
+`accInsurancePerLiquidityX128 += slashAmount * Q128 / poolEligibleLiquidity`,
 checkpointed per-position via `afterAddLiquidity`/`afterRemoveLiquidity`, so
 that only liquidity actually in-range and present *before* a slash accrues
 that slash's share.
 
-### The zero-liquidity edge case
+### Liquidity maturation: why the divisor isn't `StateLibrary.getLiquidity()`
 
-If a slash occurs while `StateLibrary.getLiquidity(poolId) == 0` (no
-in-range liquidity — the entire pool's active liquidity has moved out of
-range, unusual but possible), the accumulator cannot be updated (division
-by zero is undefined economically, not just numerically — there is no LP to
-attribute the reward to). The insurance share is held as `idleAssets`
-instead. It is **not** retroactively distributed once liquidity returns —
-doing so would require tracking which specific future LP "deserves" a past
-slash, reintroducing the enumeration problem this design avoids everywhere
-else. This is a real, disclosed limitation, not a silently swallowed edge
-case — see `LIMITATIONS.md`.
+`poolEligibleLiquidity` is a value `LPInsuranceVault` tracks internally, not
+a live read of the pool's current in-range liquidity. Liquidity just added
+is `pendingLiquidity` for `LIQUIDITY_MATURATION_BLOCKS` (1 block) before it
+is promoted to `eligibleLiquidity` and starts counting toward the divisor
+*or* earning a share of any slash. This exists specifically to close the
+flash-liquidity gap: an LP who deposits in the same block as, but strictly
+before, a slash-triggering back-run, then withdraws immediately after,
+never matures, so they contribute nothing to that slash's divisor and earn
+nothing from it — see `SECURITY.md` §"LP" for the attack this replaced and
+`V4_ARCHITECTURE_VALIDATION.md §4` for the full design, including why a
+single "last slash block" discriminator is insufficient once multiple
+slashes can land between two touches of the same position, and how the
+append-only `slashHistory` checkpoint list plus binary search
+(`_accBeforeBlock`) solves that precisely.
+
+### The zero-eligible-liquidity edge case
+
+If a slash occurs while `poolEligibleLiquidity == 0` — either because the
+pool genuinely has no in-range liquidity, or because all current in-range
+liquidity is still pending/immature — the accumulator cannot be updated
+against it (division by zero is undefined economically, not just
+numerically — there is no *eligible* LP to attribute the reward to). The
+insurance share is held as `idleAssets` instead. It is **not**
+retroactively distributed once liquidity matures or returns — doing so
+would require tracking which specific future LP "deserves" a past slash,
+reintroducing the enumeration problem this design avoids everywhere else.
+This is a real, disclosed limitation, not a silently swallowed edge case —
+see `LIMITATIONS.md`.

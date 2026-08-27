@@ -78,24 +78,41 @@ registered, active, bonded address bracketing that victim.
 
 ## LP
 
-**Flash liquidity at slash time.** Disclosed, not fully mitigated — see
-`V4_ARCHITECTURE_VALIDATION.md §4` and `MECHANISM.md`. An LP who adds a
-large position in the same block as, but strictly before, a slash-triggering
-back-run, then removes it shortly after, can claim a share of that specific
-slash despite near-zero holding duration, because
-`StateLibrary.getLiquidity()` at slash time includes whatever liquidity is
-currently in range regardless of when it arrived. A full fix needs
-time-weighted or one-block-delayed eligibility (track a position's earliest
-same-block deposit and exclude same-block liquidity from that slash's
-divisor). Not implemented in this build — the accounting complexity and
-gas cost of a second liquidity snapshot didn't clear the bar for the
-hackathon scope, and the residual risk is bounded (it can only reduce
-long-term LPs' share of an individual slash by dilution, never let anyone
-claim more than the vault actually holds — see the invariant below).
-Demonstrated concretely, not just described, by
-`test/ThetaBGAdversarial.t.sol::test_attack_flashLiquidityAtSlash_capturesShareDespiteInstantExit`,
-which shows a same-block flash-LP capturing an equal share to an honest,
-persistent LP for that one slash.
+**Flash liquidity at slash time — FIXED, originally a verified capture
+technique.** An LP who added a large position in the same block as, but
+strictly before, a slash-triggering back-run, then removed it shortly
+after, could claim a share of that specific slash despite near-zero holding
+duration, because `StateLibrary.getLiquidity()` at slash time included
+whatever liquidity was currently in range regardless of when it arrived.
+This was not a hypothetical: it was executed and confirmed by a test that
+has since been renamed and flipped to a regression check
+(`test/ThetaBGAdversarial.t.sol::test_attack_flashLiquidityAtSlash_noLongerCapturesShareDespiteInstantExit`).
+
+The fix: `LPInsuranceVault` no longer reads live in-range liquidity from the
+`PoolManager` at slash time at all. It tracks its own liquidity internally,
+split into `eligibleLiquidity` (mature) and `pendingLiquidity` (added this
+block or later, not yet mature) — both per-position and pool-wide — gated
+by `LIQUIDITY_MATURATION_BLOCKS` (1 block). A slash's divisor is
+`poolEligibleLiquidity`, so freshly-added liquidity contributes nothing to
+it; and a position only earns a share of a slash's accumulator increase for
+the liquidity it held that was *already mature* at that slash's block, via
+an append-only `slashHistory` checkpoint list plus a binary search
+(`_accBeforeBlock`) that finds the exact accumulator value at a position's
+maturity boundary — this is what stops the flash-LP's own `rewardDebtX128`
+checkpoint from retroactively claiming credit for a slash that happened
+while their liquidity was still pending, which a naive divisor-only fix
+would not have caught. Both `LPInsuranceVaultInvariantTest` invariants
+(fund solvency and outstanding-claims-never-exceed-held-assets) pass across
+128,000 randomized calls each, including block-advancing actions and
+multi-slash sequences that straddle a position's individual maturity
+boundary — the specific scenario a simpler "last slash block" discriminator
+was found to mishandle during development. See `V4_ARCHITECTURE_VALIDATION.md
+§4` and `MECHANISM.md` for the full design.
+
+Note: the live Unichain Sepolia deployment (see `DEPLOYMENT.md`) predates
+this fix and still runs the old, unfixed `LPInsuranceVault` bytecode —
+contracts are immutable once deployed, so this fix does not retroactively
+apply there without a redeploy.
 
 **Reward-index staleness without checkpointing.** Solved, not just
 disclosed — this is exactly why `afterAddLiquidity`/`afterRemoveLiquidity`

@@ -16,8 +16,8 @@ reasoning behind each.
 - **JIT liquidity attacks and LVR are out of scope.** The predicate looks at
   swap sequences only; it has no visibility into liquidity-provision timing
   as an attack vector in itself (only as an *accounting* concern for
-  distributing insurance, which is a different problem — see "flash
-  liquidity at slash time" below).
+  distributing insurance, which is a different, now-resolved problem — see
+  "LP accounting" below).
 - **Pattern detection, not intent proof.** See `MECHANISM.md` §"What this
   predicate is, and is not, proof of."
 
@@ -54,11 +54,23 @@ regression tests that now guard it.
   once liquidity returns (`MECHANISM.md` §"the zero-liquidity edge case").
   Funds sit as `idleAssets`, fully claimable in principle but with no LP
   attribution mechanism for that specific slash.
-- **Flash liquidity at slash time** can capture a disproportionate share of
-  one specific slash (`SECURITY.md` §"LP" — disclosed, not mitigated in this
-  build).
 - **No cross-pool LP test exists yet**, though the state is structurally
   isolated per `PoolId` throughout.
+
+**Resolved since the first pass — not a current limitation, kept here for
+the paper trail:** liquidity added in the same block as, but strictly
+before, a slash-triggering back-run could previously be removed immediately
+after and still capture a share of that slash despite near-zero holding
+duration, verified by an adversarial test before being fixed. Liquidity now
+requires `LIQUIDITY_MATURATION_BLOCKS` (1 block) of age before it counts
+toward a slash's divisor *or* earns any share of one — tracked per-position
+and pool-wide via an eligible/pending split, with an append-only
+`slashHistory` checkpoint list letting a position's exact maturity boundary
+be credited precisely even when multiple slashes land between two touches
+of that position. See `SECURITY.md` §"LP" and `MECHANISM.md` for the design,
+and `test/ThetaBGAdversarial.t.sol`'s
+`test_attack_flashLiquidityAtSlash_noLongerCapturesShareDespiteInstantExit`
+for the regression test that now guards it.
 
 ## Economic parameters
 
@@ -107,8 +119,9 @@ This build ships 252 passing tests across 8 suites:
   test.
 - `ThetaBGAdversarial.t.sol` (13) — attacks modeled on build brief §71,
   including two *verified* findings confirmed by running the attack rather
-  than assumed from reading the code: ring-buffer eviction (since fixed —
-  see below) and flash-liquidity capture (still open — see `SECURITY.md`).
+  than assumed from reading the code, both since fixed: ring-buffer eviction
+  and flash-liquidity capture at slash time (see "Scope of detection" and
+  "LP accounting" above).
 - `SearcherRegistryInvariant.t.sol` (5) + `LPInsuranceVaultInvariant.t.sol`
   (4) — Foundry invariant suites with dedicated handlers
   (`test/invariant/handlers/`), each run for 256 runs × 500 calls (128,000
@@ -125,9 +138,9 @@ process (see `SECURITY.md` above). Explicitly still not built:
   `LPInsuranceVault` in isolation, not the fully-wired hook under randomized
   adversarial sequences.
 - Gas report (`GAS_REPORT.md` was not generated this pass).
-- A fix (or a chosen, documented mitigation) for the flash-liquidity-at-slash
-  finding — still disclosed, not resolved. (The ring-buffer eviction finding
-  *has* been fixed — see "Scope of detection" above.)
+
+(The ring-buffer eviction and flash-liquidity-at-slash findings have both
+been fixed — see "Scope of detection" and "LP accounting" above.)
 
 ## Deployment
 
@@ -135,11 +148,12 @@ process (see `SECURITY.md` above). Explicitly still not built:
 `DEPLOYMENT.md` for addresses, verified contract links, and a real,
 on-chain, production-threshold sandwich detection + slash (transaction
 hashes included, not just log output) — the earlier "not yet deployed"
-limitation no longer applies. What deployment did *not* cover: the
-flash-liquidity-at-slash and any other unresolved findings above are still
-unresolved on this live deployment too, since deploying doesn't fix them —
-anyone interacting with this specific instance is exposed to exactly the
-gaps documented in this file and in `SECURITY.md`.
+limitation no longer applies. What deployment did *not* cover: the live
+`LPInsuranceVault` predates the flash-liquidity-at-slash fix and still runs
+the old, unfixed bytecode (contracts are immutable once deployed) — any
+remaining unresolved findings above are also still live on that instance,
+since deploying a fix to this repo doesn't retroactively patch an
+already-deployed contract. Redeploying to pick up the fix has not been done.
 
 ## Frontend
 
@@ -147,7 +161,9 @@ Not built in this pass.
 
 ## What would change first in a production hardening pass
 
-In rough priority order: (1) time-weighted/delayed liquidity eligibility to
-close the flash-LP-at-slash gap, (2) exact-output priority fee support,
-(3) a Foundry invariant-test harness, (4) per-pool-fixed-at-init economic
-parameters, (5) gas optimization pass with a checked-in gas report.
+In rough priority order: (1) exact-output priority fee support, (2) a third
+invariant suite over `ThetaBGHook` itself (swap-driven attacks, liquidity
+changes, and slashes through one randomized handler), (3) per-pool-fixed-
+at-init economic parameters, (4) gas optimization pass with a checked-in
+gas report, (5) redeploy to pick up the flash-liquidity-at-slash fix on the
+live Unichain Sepolia instance, which still runs the pre-fix bytecode.
