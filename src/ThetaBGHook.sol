@@ -28,7 +28,8 @@ import {SandwichPredicate} from "./libraries/SandwichPredicate.sol";
 ///
 /// Deliberate scope, stated up front (see LIMITATIONS.md for the full list):
 /// - Detection is same-block, cross-transaction — never "same-transaction"
-///   (transient storage cannot span transactions; see the ring buffer below).
+///   (transient storage cannot span transactions; see the per-searcher open
+///   leg tracked below).
 /// - Searcher identity = the direct caller of PoolManager.swap(). Since an
 ///   EOA cannot implement IUnlockCallback, every real caller is already a
 ///   contract — this matches how MEV searcher bots operate in practice, and
@@ -95,8 +96,37 @@ contract ThetaBGHook is IHooks {
     uint256 public pendingProtocolFees;
 
     mapping(PoolId => LPInsuranceVault) public vaults;
-    mapping(PoolId => SandwichPredicate.SwapRecord[3]) private ringBuffer;
-    mapping(PoolId => uint8) private ringNext;
+
+    /// @notice A registered searcher's most recent unclosed swap in the
+    /// current block, per pool. This replaces an earlier fixed 3-slot
+    /// ring-buffer design that keyed detection off "the last 3 swaps in the
+    /// pool" — that design had a verified evasion: a single interstitial
+    /// swap from anyone, between the victim leg and the back-run leg,
+    /// evicted the front-run record before the bracket completed (see
+    /// SECURITY.md §"Searcher" / LIMITATIONS.md for the writeup and the
+    /// test pair that proved it, now retired in favor of this fix). Keying
+    /// per (pool, searcher) instead means only the searcher's *own* next
+    /// swap can ever consume or overwrite their open leg — no third party's
+    /// swap, decoy or not, can evict it.
+    struct OpenLeg {
+        uint64 blockNumber;
+        bool zeroForOne;
+        uint160 sqrtPriceX96Before;
+        uint160 sqrtPriceX96After;
+        bool occupied;
+    }
+
+    mapping(PoolId => mapping(address => OpenLeg)) private openLegs;
+
+    /// @notice The sender of the most recent swap in each pool, captured
+    /// *before* being overwritten by the current swap. Used to reconstruct
+    /// "was there a distinct sender between my open leg and this closing
+    /// swap" (the generalization of the original predicate's condition 3
+    /// to a window that can contain any number of interleaved swaps, not
+    /// just exactly one) and as the informational "victim" address on a
+    /// detected slash. See `afterSwap` for the correctness argument on why
+    /// this is safe to treat as same-block without a separate block field.
+    mapping(PoolId => address) private lastSwapSender;
 
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
@@ -225,37 +255,83 @@ contract ThetaBGHook is IHooks {
         uint160 sqrtPriceX96Before = _tload(_priceBeforeSlot(poolId));
         (uint160 sqrtPriceX96After,,,) = poolManager.getSlot0(poolId);
 
-        // `w` is the slot about to be overwritten with this (newest) swap.
-        // After writing, the three filled slots in oldest-to-newest order
-        // are (w+1)%3, (w+2)%3, w — i.e. the slot we just wrote is always
-        // the *newest* record, and the slot we're about to overwrite next
-        // time is always the *oldest* of the three still held.
-        uint8 w = ringNext[poolId];
-        ringBuffer[poolId][w] = SandwichPredicate.SwapRecord({
+        // Captured *before* being overwritten below — see the `lastSwapSender`
+        // doc comment above for what this is and why it's safe to treat as
+        // same-block without a separate stored block number for it.
+        address priorSender = lastSwapSender[poolId];
+        lastSwapSender[poolId] = sender;
+
+        // Only worth tracking/evaluating for active bonded searchers —
+        // otherwise there is nothing to slash and no reason to spend
+        // storage on an ordinary trader's swap.
+        if (registry.isActiveSearcher(sender)) {
+            OpenLeg storage leg = openLegs[poolId][sender];
+            _tryDetectAndSlash(poolId, sender, priorSender, leg, params.zeroForOne, sqrtPriceX96Before, sqrtPriceX96After);
+
+            // This swap becomes the new open leg regardless of whether it
+            // just closed one — a searcher's own swap can simultaneously
+            // close one potential bracket and open the next.
+            leg.blockNumber = uint64(block.number);
+            leg.zeroForOne = params.zeroForOne;
+            leg.sqrtPriceX96Before = sqrtPriceX96Before;
+            leg.sqrtPriceX96After = sqrtPriceX96After;
+            leg.occupied = true;
+        }
+
+        return (IHooks.afterSwap.selector, 0);
+    }
+
+    /// @notice Evaluates the searcher's currently-open leg (if any, and if
+    /// still within this block) against the swap that just closed it. Split
+    /// out of `afterSwap` itself purely to keep that function's local-variable
+    /// count low enough for the legacy codegen's stack depth (three inline
+    /// SwapRecord literals plus the surrounding swap context overflowed it).
+    function _tryDetectAndSlash(
+        PoolId poolId,
+        address sender,
+        address priorSender,
+        OpenLeg storage leg,
+        bool zeroForOne,
+        uint160 sqrtPriceX96Before,
+        uint160 sqrtPriceX96After
+    ) private {
+        if (!leg.occupied || leg.blockNumber != block.number) return;
+
+        SandwichPredicate.SwapRecord memory a = SandwichPredicate.SwapRecord({
+            sender: sender,
+            blockNumber: leg.blockNumber,
+            zeroForOne: leg.zeroForOne,
+            sqrtPriceX96Before: leg.sqrtPriceX96Before,
+            sqrtPriceX96After: leg.sqrtPriceX96After,
+            occupied: true
+        });
+        // Synthetic "middle" record. Its price fields are never read by the
+        // predicate (see SandwichPredicate.sol) — only its sender matters
+        // here, standing in for "whoever swapped most recently before this
+        // closing leg," which correctly generalizes condition 3 to a window
+        // containing any number of interleaved swaps: if priorSender is the
+        // searcher themselves (nothing happened in between), condition 3
+        // fails exactly as it should for a victimless round trip.
+        SandwichPredicate.SwapRecord memory b = SandwichPredicate.SwapRecord({
+            sender: priorSender,
+            blockNumber: uint64(block.number),
+            zeroForOne: leg.zeroForOne,
+            sqrtPriceX96Before: 0,
+            sqrtPriceX96After: 0,
+            occupied: true
+        });
+        SandwichPredicate.SwapRecord memory c = SandwichPredicate.SwapRecord({
             sender: sender,
             blockNumber: uint64(block.number),
-            zeroForOne: params.zeroForOne,
+            zeroForOne: zeroForOne,
             sqrtPriceX96Before: sqrtPriceX96Before,
             sqrtPriceX96After: sqrtPriceX96After,
             occupied: true
         });
-        ringNext[poolId] = (w + 1) % 3;
 
-        SandwichPredicate.SwapRecord memory a = ringBuffer[poolId][(w + 1) % 3]; // oldest = front-run candidate
-        SandwichPredicate.SwapRecord memory b = ringBuffer[poolId][(w + 2) % 3]; // middle = victim candidate
-        SandwichPredicate.SwapRecord memory c = ringBuffer[poolId][w]; // newest = back-run candidate
-
-        // Only worth evaluating if the would-be front-runner is still an
-        // active bonded searcher — otherwise there is nothing to slash and
-        // no reason to flag an ordinary three-swap coincidence.
-        if (
-            registry.isActiveSearcher(a.sender)
-                && SandwichPredicate.isSandwich(a, b, c, restorationThresholdBps, minDisplacementBps)
-        ) {
-            _slashAndFund(poolId, a.sender, b.sender);
+        if (SandwichPredicate.isSandwich(a, b, c, restorationThresholdBps, minDisplacementBps)) {
+            _slashAndFund(poolId, sender, priorSender);
         }
-
-        return (IHooks.afterSwap.selector, 0);
     }
 
     function afterAddLiquidity(

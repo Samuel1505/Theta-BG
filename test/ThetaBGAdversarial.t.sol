@@ -103,15 +103,16 @@ contract ThetaBGAdversarialTest is Test, Deployers {
     // Attack: ring-buffer eviction — a genuine, verified evasion technique
     // ════════════════════════════════════════════════════════════════════
 
-    /// @notice The ring buffer holds exactly the *last 3* swaps in the pool
-    /// (build brief §14's 3-slot design). If a fourth, unrelated swap lands
-    /// between the victim leg and the back-run leg, it evicts the front-run
-    /// record before the bracket ever completes — defeating detection even
-    /// though the underlying attack pattern is economically identical to a
-    /// detected one. This is a REAL, verified gap in this build's scope
-    /// (not previously covered), not a defect being papered over — recorded
-    /// here and cross-referenced in LIMITATIONS.md.
-    function test_attack_ringBufferEviction_decoySwapDefeatsDetection() public {
+    /// @notice FIXED (was a verified gap): detection used to be keyed off a
+    /// 3-slot pool-wide ring buffer, so a single unrelated swap landing
+    /// between the victim leg and the back-run leg evicted the front-run
+    /// record before the bracket completed. ThetaBGHook now keys the
+    /// front-run record per (pool, searcher) instead of per pool-wide
+    /// position — only the searcher's own next swap can ever consume or
+    /// overwrite it, so a third party's decoy swap in between no longer
+    /// changes the outcome. See SECURITY.md §"Searcher" and
+    /// V4_ARCHITECTURE_VALIDATION.md §2 for the fix's design.
+    function test_attack_decoySwapBetweenVictimAndBackRun_noLongerEvadesDetection() public {
         ActorRouter searcher = _newSearcher();
         ActorRouter victim = _newTrader();
         ActorRouter decoy = _newTrader();
@@ -119,19 +120,39 @@ contract ThetaBGAdversarialTest is Test, Deployers {
         searcher.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -50e18, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
         victim.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -20e18, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
         // Decoy swap — could be the attacker's own unrelated wallet, a bot,
-        // or genuinely unrelated background pool activity. Either way it
-        // occupies the ring buffer slot the front-run needs to still hold.
+        // or genuinely unrelated background pool activity. It no longer
+        // matters: the front-run record lives at (poolId, searcher), and
+        // this decoy is neither.
         decoy.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -1e17, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
         searcher.swap(poolKey, SwapParams({zeroForOne: false, amountSpecified: -70e18, sqrtPriceLimitX96: MAX_PRICE_LIMIT}));
 
-        // Verified: the bond survives. This is the attack succeeding, not a
-        // false assertion — see the doc comment above.
-        assertEq(_bondOf(searcher), MIN_BOND, "VERIFIED GAP: a decoy swap between victim and back-run evades detection");
+        assertEq(_bondOf(searcher), 0, "a decoy swap between the victim and back-run legs must no longer evade detection");
     }
 
-    /// @notice Confirms the mechanism: without the decoy, the identical
-    /// front-run/victim/back-run amounts *do* get slashed — isolating the
-    /// decoy swap as the sole variable that changed the outcome.
+    /// @notice The fix generalizes beyond exactly one decoy — any number of
+    /// unrelated interleaved swaps, from any number of different addresses,
+    /// still can't evict the searcher's own open leg.
+    function test_attack_multipleDecoySwaps_stillDoesNotEvadeDetection() public {
+        ActorRouter searcher = _newSearcher();
+        ActorRouter victim = _newTrader();
+        ActorRouter decoy1 = _newTrader();
+        ActorRouter decoy2 = _newTrader();
+        ActorRouter decoy3 = _newTrader();
+
+        searcher.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -50e18, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
+        victim.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -20e18, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
+        decoy1.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
+        decoy2.swap(poolKey, SwapParams({zeroForOne: false, amountSpecified: -1e15, sqrtPriceLimitX96: MAX_PRICE_LIMIT}));
+        decoy3.swap(poolKey, SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: MIN_PRICE_LIMIT}));
+        searcher.swap(poolKey, SwapParams({zeroForOne: false, amountSpecified: -70e18, sqrtPriceLimitX96: MAX_PRICE_LIMIT}));
+
+        assertEq(_bondOf(searcher), 0, "any number of interleaved decoy swaps must not evade detection");
+    }
+
+    /// @notice Confirms the mechanism: without any decoy, the identical
+    /// front-run/victim/back-run amounts also get slashed — isolating the
+    /// decoy swaps as never having been the variable that mattered, before
+    /// or after the fix.
     function test_attack_ringBufferEviction_controlWithoutDecoy_doesSlash() public {
         ActorRouter searcher = _newSearcher();
         ActorRouter victim = _newTrader();
