@@ -56,10 +56,10 @@ returns** (`NonzeroDeltaCount` must be zero to re-lock). This is only
 possible because EIP-1153 storage is wiped at the end of the transaction —
 v4-core's own core accounting depends on this exact property.
 
-**What Theta-BG requires (per brief).** A ring buffer that remembers the
-last three swaps — front-run, victim, back-run — where those three swaps
-are ordinarily **three separate transactions** that happen to land in the
-same block.
+**What Theta-BG requires (per brief).** A mechanism that remembers a
+searcher's front-run and pairs it back up with their own back-run —
+front-run, victim, back-run — where those three swaps are ordinarily
+**three separate transactions** that happen to land in the same block.
 
 **Compatible?** **No, not as described in the brief.** Transient storage
 cannot carry data from transaction 1 to transaction 2 — it is gone the
@@ -70,12 +70,23 @@ using `tstore`, which cannot survive between them. This is the single most
 important correction to the brief's mechanism.
 
 **Implementation decision.** Split state by actual scope:
-- **Persistent storage** (regular `SSTORE`) for the three-slot ring buffer,
-  keyed by `poolId`, holding `(blockNumber, sender, zeroForOne, sqrtPriceX96Before, sqrtPriceX96After)`
-  per slot. A read compares the stored `blockNumber` to `block.number`; a
-  stale slot (different block) is treated as empty rather than physically
-  cleared — cheaper, and avoids a race where a same-block "reset" could be
-  reordered.
+- **Persistent storage** (regular `SSTORE`) for a per-`(poolId, searcher)`
+  "open leg" — `(blockNumber, zeroForOne, sqrtPriceX96Before, sqrtPriceX96After)`
+  for that searcher's most recent unclosed swap in the current block, plus a
+  single per-pool "last swap sender" value used to reconstruct who (if
+  anyone) swapped between a searcher's open leg and its close. A read
+  compares the stored `blockNumber` to `block.number`; a stale entry
+  (different block) is treated as empty rather than physically cleared —
+  cheaper, and avoids a race where a same-block "reset" could be reordered.
+  (An earlier version of this design used a fixed 3-slot ring buffer keyed
+  by pool position rather than by searcher — abandoned after
+  `test/ThetaBGAdversarial.t.sol` proved it had a real eviction gap: any
+  unrelated swap landing between the victim and back-run legs could evict
+  the front-run record before the bracket completed, since the buffer held
+  "the last 3 swaps in the pool" rather than "this searcher's own last
+  swap." Keying per searcher instead means only that searcher's own next
+  swap can ever consume or overwrite their open leg — see `ThetaBGHook.sol`'s
+  `OpenLeg` struct and `_tryDetectAndSlash`.)
 - **Transient storage** is still used, but only for its legitimate scope:
   passing `sqrtPriceX96` captured in `beforeSwap` to the same call's
   `afterSwap` (both invoked within the *same* `PoolManager.swap()`

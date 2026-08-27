@@ -5,9 +5,9 @@
 ```
 src/
   ThetaBGHook.sol            IHooks implementation. Owns identity resolution,
-                              the ring buffer, predicate evaluation, slash
-                              triggering, priority-fee collection, and LP
-                              liquidity checkpointing.
+                              the per-searcher open-leg tracking, predicate
+                              evaluation, slash triggering, priority-fee
+                              collection, and LP liquidity checkpointing.
   SearcherRegistry.sol        Pure bond accounting. One instance, deployed by
                               the hook's constructor, shared by every pool
                               that uses this hook deployment.
@@ -51,17 +51,21 @@ lives. Theta-BG splits it:
 ```
 TX 1 (searcher, front-run)
   beforeSwap:  tstore(sqrtPriceX96 before this swap)     [transient, this tx only]
-  afterSwap:   ring buffer[poolId][w] = {sender, block, dir, priceBefore, priceAfter}
-               ringNext[poolId] = (w+1) % 3
+  afterSwap:   priorSender = lastSwapSender[poolId]; lastSwapSender[poolId] = sender
+               openLegs[poolId][searcher] = {block, dir, priceBefore, priceAfter}   // no prior open leg -> nothing to evaluate yet
 
-TX 2 (victim)
-  same afterSwap append, next ring slot
+TX 2 (victim, any address — not the searcher)
+  afterSwap:   priorSender = lastSwapSender[poolId] (== searcher); lastSwapSender[poolId] = victim
+               victim is not an active searcher -> no open-leg write, buffer untouched
 
 TX 3 (searcher, back-run, same block)
-  afterSwap:   append; now evaluate SandwichPredicate.isSandwich(a, b, c, ...)
-               a = oldest of the 3 (front-run), b = middle (victim), c = newest (back-run)
-               if match AND registry.isActiveSearcher(a.sender):
-                 amount = registry.slash(a.sender)          // entire bond, zeroed
+  afterSwap:   priorSender = lastSwapSender[poolId] (== victim, or the *last* of any number
+               of interleaved swaps since — see V4_ARCHITECTURE_VALIDATION.md §2 for why a
+               decoy swap here no longer evades this); lastSwapSender[poolId] = searcher
+               leg = openLegs[poolId][searcher]   // still this block -> potential close
+               a = leg (front-run), b = synthetic record with sender=priorSender, c = this swap (back-run)
+               if SandwichPredicate.isSandwich(a, b, c, ...) AND registry.isActiveSearcher(searcher):
+                 amount = registry.slash(searcher)          // entire bond, zeroed
                  protocolCut = amount * protocolShareBps / 10000
                  insuranceCut = amount - protocolCut
                  pendingProtocolFees += protocolCut
@@ -69,11 +73,16 @@ TX 3 (searcher, back-run, same block)
                    -> wrap to WETH -> accInsurancePerLiquidityX128 += insuranceCut * Q128 / activeLiquidity
                    -> try strategy.deposit(insuranceCut) catch { hold idle }
                  emit SandwichSlashed(...)
+               openLegs[poolId][searcher] = {block, dir, priceBefore, priceAfter}   // this swap becomes the new open leg regardless
 ```
 
 Every step above is exercised by `test/ThetaBGHook.t.sol`'s
 `test_sandwichAttack_slashesBondAndFundsInsurance`, against a real
 `PoolManager`, real hook, and real (mock) ERC4626 strategy — not simulated.
+The decoy-swap-in-between case specifically is exercised by
+`test/ThetaBGAdversarial.t.sol`'s
+`test_attack_decoySwapBetweenVictimAndBackRun_noLongerEvadesDetection` and
+`test_attack_multipleDecoySwaps_stillDoesNotEvadeDetection`.
 
 ## Priority fee data flow
 

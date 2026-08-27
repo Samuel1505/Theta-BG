@@ -20,17 +20,19 @@ reasoning behind each.
   liquidity at slash time" below).
 - **Pattern detection, not intent proof.** See `MECHANISM.md` §"What this
   predicate is, and is not, proof of."
-- **Ring-buffer eviction defeats detection — verified, not hypothetical.**
-  The 3-slot ring buffer only ever holds the *last three* swaps in a pool.
-  One interstitial swap between the victim and back-run legs evicts the
-  front-run record, so condition 1 (`a.sender == c.sender`) never matches.
-  Confirmed by an actual passing/failing test pair in
-  `test/ThetaBGAdversarial.t.sol`
-  (`test_attack_ringBufferEviction_decoySwapDefeatsDetection` vs.
-  `test_attack_ringBufferEviction_controlWithoutDecoy_doesSlash`), not just
-  reasoned about. See `SECURITY.md` §"Searcher" for the write-up and why it
-  isn't mitigated in this build (gas cost of unbounded per-block history vs.
-  DoS risk of a buffer size an attacker could manipulate the growth of).
+
+**Resolved since the first pass — not a current limitation, kept here for
+the paper trail:** an earlier 3-slot pool-wide ring buffer design let a
+single interstitial swap between the victim and back-run legs evict the
+front-run record and defeat detection, verified by an adversarial test
+before being fixed. Detection is now keyed per `(pool, searcher)` instead of
+per ring-buffer position, which closes this entirely rather than just
+narrowing it — see `SECURITY.md` §"Searcher" and
+`V4_ARCHITECTURE_VALIDATION.md §2` for the design, and
+`test/ThetaBGAdversarial.t.sol`'s
+`test_attack_decoySwapBetweenVictimAndBackRun_noLongerEvadesDetection` /
+`test_attack_multipleDecoySwaps_stillDoesNotEvadeDetection` for the
+regression tests that now guard it.
 
 ## Identity model
 
@@ -86,7 +88,7 @@ reasoning behind each.
 
 ## Testing
 
-This build ships 251 passing tests across 8 suites:
+This build ships 252 passing tests across 8 suites:
 
 - `SandwichPredicate.t.sol` (53) — pure predicate unit + fuzz tests,
   including monotonicity/antitonicity invariants on the threshold
@@ -103,10 +105,10 @@ This build ships 251 passing tests across 8 suites:
 - `ThetaBGFalsePositive.t.sol` (20) — the build brief §51 checklist, all 16
   named scenarios plus 4 more in the same spirit, each a named, dedicated
   test.
-- `ThetaBGAdversarial.t.sol` (12) — attacks modeled on build brief §71,
-  including two *verified* findings (ring-buffer eviction, flash-liquidity
-  capture — see `SECURITY.md`) that were confirmed by running the attack,
-  not assumed from reading the code.
+- `ThetaBGAdversarial.t.sol` (13) — attacks modeled on build brief §71,
+  including two *verified* findings confirmed by running the attack rather
+  than assumed from reading the code: ring-buffer eviction (since fixed —
+  see below) and flash-liquidity capture (still open — see `SECURITY.md`).
 - `SearcherRegistryInvariant.t.sol` (5) + `LPInsuranceVaultInvariant.t.sol`
   (4) — Foundry invariant suites with dedicated handlers
   (`test/invariant/handlers/`), each run for 256 runs × 500 calls (128,000
@@ -114,9 +116,8 @@ This build ships 251 passing tests across 8 suites:
   reward-accounting solvency respectively.
 
 This is real coverage, not padding to hit a number — every test asserts a
-specific, named property, and two genuine gaps were found and disclosed in
-the process (see `SECURITY.md`, `LIMITATIONS.md` above). Explicitly still
-not built:
+specific, named property, and genuine gaps were found and disclosed in the
+process (see `SECURITY.md` above). Explicitly still not built:
 
 - A third invariant suite over `ThetaBGHook` itself (combining swap-driven
   attacks, liquidity changes, and slashes through one randomized handler) —
@@ -124,8 +125,9 @@ not built:
   `LPInsuranceVault` in isolation, not the fully-wired hook under randomized
   adversarial sequences.
 - Gas report (`GAS_REPORT.md` was not generated this pass).
-- A fix (or a chosen, documented mitigation) for the ring-buffer eviction
-  and flash-liquidity-at-slash findings — currently disclosed, not resolved.
+- A fix (or a chosen, documented mitigation) for the flash-liquidity-at-slash
+  finding — still disclosed, not resolved. (The ring-buffer eviction finding
+  *has* been fixed — see "Scope of detection" above.)
 
 ## Deployment
 

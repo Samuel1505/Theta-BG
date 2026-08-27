@@ -37,24 +37,32 @@ the searcher.
 5a) — see `MECHANISM.md`. Verified by
 `test_dustDisplacement_belowMinimum_notDetected`.
 
-**Ring-buffer eviction — a verified, disclosed evasion technique.** The
-3-slot ring buffer (`build brief §14`) holds only the *last three* swaps in
-the pool. If any fourth, unrelated swap lands between the victim leg and the
-back-run leg, it evicts the front-run record before the bracket completes —
-`a.sender` no longer matches the back-run's sender, so condition 1 never
-fires. This is not a hypothetical: it is executed and confirmed in
-`test/ThetaBGAdversarial.t.sol::test_attack_ringBufferEviction_decoySwapDefeatsDetection`,
-with `test_attack_ringBufferEviction_controlWithoutDecoy_doesSlash` as the
-control proving the decoy swap is the only variable that changed the
-outcome. A searcher aware of this could pay an accomplice (or even
-themselves, from a third address) a small amount to place one interstitial
-swap and reliably defeat detection. **Not mitigated in this build** — see
-`LIMITATIONS.md` for the production-hardening options (a wider buffer, or
-detection over the full in-block swap history rather than a fixed 3-slot
-window) and why they weren't implemented here (gas cost of unbounded
-per-block history, and DoS risk of a *searcher-manipulable* buffer size —
-see build brief §72's constraint against unbounded state that a malicious
-actor can control the growth of).
+**Ring-buffer eviction — FIXED, originally a verified evasion technique.**
+The original design used a 3-slot ring buffer (`build brief §14`) holding
+only the *last three* swaps in the pool. Any fourth, unrelated swap landing
+between the victim leg and the back-run leg evicted the front-run record
+before the bracket completed — `a.sender` no longer matched the back-run's
+sender, so condition 1 never fired. This was not a hypothetical: it was
+executed and confirmed by a test that has since been renamed and flipped to
+a regression check
+(`test/ThetaBGAdversarial.t.sol::test_attack_decoySwapBetweenVictimAndBackRun_noLongerEvadesDetection`,
+plus `test_attack_multipleDecoySwaps_stillDoesNotEvadeDetection` proving the
+fix generalizes to any number of interleaved decoys).
+
+The fix: detection state is now keyed per `(pool, searcher)` — `OpenLeg` in
+`ThetaBGHook.sol` — instead of per pool-wide ring position. A searcher's
+front-run record can only ever be consumed or overwritten by *that same
+searcher's* own next swap; a third party's swap, decoy or not, in between
+no longer touches it. "Who swapped in between" (the generalized condition 3)
+is reconstructed from a single per-pool `lastSwapSender` value captured
+before each swap overwrites it, which correctly reduces to "nobody" when the
+searcher's own two swaps are back-to-back with nothing else in between. This
+costs no more storage per swap than the ring buffer did (one open-leg slot
+per active searcher who has traded a pool, comparable to how
+`SearcherRegistry.searchers` already grows one slot per searcher) and isn't
+a new unbounded-per-block growth vector — see build brief §72's constraint
+against state a malicious actor can grow arbitrarily within one block, which
+this design doesn't create: it's O(1) per swap, not O(swaps-in-block).
 
 ## Victim
 
@@ -144,37 +152,54 @@ transaction (Theta-BG's own hook never does this; it would require some
 other hook attached to the same pool, or unusual router behavior, to
 trigger it), the inner call's `tstore` could overwrite the outer call's
 pending "before" price before the outer `afterSwap` reads it. **This can
-only ever cause a missed detection (false negative) — a ring-buffer entry
+only ever cause a missed detection (false negative) — an open-leg entry
 recorded with a wrong `sqrtPriceX96Before` fails the predicate's price
 conditions rather than passing them, since `sqrtPriceX96After` in that same
-record would then be inconsistent with a real price *movement* for that
+entry would then be inconsistent with a real price *movement* for that
 specific swap.** It can never cause a wrongful slash. Not hardened against
 in this build; a production version could add a per-call nesting counter if
 this scope is ever relevant to a specific hook configuration.
 
-**Pool isolation.** Ring buffer and accumulator state are keyed by `PoolId`
-throughout (`mapping(PoolId => ...)`), never a bare global. Verified
-structurally (every mapping in `ThetaBGHook.sol`/`LPInsuranceVault.sol` is
-`PoolId`-keyed) rather than by a dedicated cross-pool test — a two-pool
-integration test is listed as follow-up work in `LIMITATIONS.md`.
+**Pool isolation.** Every piece of detection and accumulator state
+(`openLegs`, `lastSwapSender`, `vaults`, `accInsurancePerLiquidityX128`) is
+keyed by `PoolId` throughout (`mapping(PoolId => ...)`), never a bare
+global. Verified structurally (every such mapping in
+`ThetaBGHook.sol`/`LPInsuranceVault.sol` is `PoolId`-keyed) and exercised
+directly by `test_multiplePools_slashInPoolA_doesNotFundPoolBsVault` and
+`test_attack_crossPoolState_doesNotLeakIntoUnrelatedPool`.
 
-**Denial of service via unbounded state.** The ring buffer is a fixed
-3-slot array per pool (`SandwichPredicate.SwapRecord[3]`), overwritten
-circularly — no growth, no per-address arrays, no iteration anywhere in the
-hot path. `SearcherRegistry` and `LPInsuranceVault` both use direct mapping
-lookups keyed by address/position, never enumeration.
+**Denial of service via unbounded state.** Per-swap storage writes are O(1):
+one `OpenLeg` slot per active searcher who has traded a given pool (keyed by
+`(poolId, searcher)`, overwritten in place — never appended to, never
+iterated), plus one `lastSwapSender` value per pool. No array grows with the
+number of swaps in a block, and nothing here scales with how many decoy or
+unrelated swaps land in a block — a searcher's own open leg is touched only
+by that searcher's own swaps. `SearcherRegistry` and `LPInsuranceVault` both
+use direct mapping lookups keyed by address/position, never enumeration.
 
-## Invariants (informal — not yet exercised by a Foundry invariant-test
-harness; see `LIMITATIONS.md` for that gap)
+## Invariants
+
+Exercised by two Foundry invariant suites
+(`test/invariant/SearcherRegistryInvariant.t.sol`,
+`test/invariant/LPInsuranceVaultInvariant.t.sol`), each run for 256 runs ×
+500 calls (128,000 calls) against a handler that drives the contract through
+every externally-callable action in random order and amounts — not just
+asserted informally:
 
 - `amountSlashed <= bond held immediately before the slash` — true by
   construction (`amountSlashed = s.bond` in `SearcherRegistry.slash`, not a
-  separately-computed value that could exceed it).
+  separately-computed value that could exceed it); cross-checked by
+  `invariant_neverPaysOutMoreThanWasBonded` and
+  `invariant_sumOfIndividualBondsMatchesBalance`.
 - `protocolCut + insuranceCut == amountSlashed` — true by construction
   (`insuranceCut = amountSlashed - protocolCut`, not two independently
   rounded quantities).
 - `sum of all LP claims for a pool <= that pool's LPInsuranceVault.availableBalance() at any point in time` —
-  follows from the accumulator design (an LP can only ever claim
-  `accInsurancePerLiquidityX128`-derived amounts that were funded by an
-  actual `receiveSlash()` deposit), but is not yet fuzzed/invariant-tested
-  directly against rounding edge cases in `FullMath.mulDiv`.
+  proven directly by `invariant_outstandingClaimsNeverExceedHeldAssets` and
+  `invariant_fundedCoversClaimedPlusOutstanding` against real
+  `FullMath.mulDiv` rounding, not just asserted from the accumulator design.
+
+Not yet covered by an invariant harness: `ThetaBGHook` itself under
+randomized sequences of swaps, attacks, and liquidity changes together (the
+two suites above test `SearcherRegistry` and `LPInsuranceVault` in
+isolation) — see `LIMITATIONS.md`.

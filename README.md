@@ -61,7 +61,7 @@ forge build
 forge test
 ```
 
-251 tests across 8 suites — pure predicate unit + fuzz tests, registry and
+252 tests across 8 suites — pure predicate unit + fuzz tests, registry and
 vault unit + fuzz tests, a full end-to-end integration suite against a real
 `PoolManager`, a dedicated false-positive checklist, an adversarial suite,
 and two Foundry invariant suites (128,000 randomized calls each). See
