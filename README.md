@@ -24,6 +24,7 @@ the original pitch.
 | [`MECHANISM.md`](MECHANISM.md) | The five-condition predicate formalized, bond economics, insurance-vault semantics |
 | [`SECURITY.md`](SECURITY.md) | Threat model by actor, invariants |
 | [`LIMITATIONS.md`](LIMITATIONS.md) | What this build does *not* do yet, stated explicitly |
+| [`DEPLOYMENT.md`](DEPLOYMENT.md) | Live on Unichain Sepolia — verified addresses, and a real on-chain slash with transaction hashes |
 
 ## Contracts
 
@@ -77,7 +78,9 @@ forge test --match-path "test/invariant/*"        # invariant suites only
 ## Status
 
 Contracts and tests are real and passing against actual `v4-core` /
-`v4-periphery` / OpenZeppelin dependencies (see `remappings.txt`). No
-testnet deployment has been made yet. An early-stage frontend scaffold
-exists in `web/` (Vite + React + TypeScript, not yet built out) — see
-`LIMITATIONS.md` for the full list of what's deliberately deferred.
+`v4-periphery` / OpenZeppelin dependencies (see `remappings.txt`). **Live on
+Unichain Sepolia** — see `DEPLOYMENT.md` for verified contract addresses and
+a real, on-chain sandwich detection + slash at production thresholds
+(transaction hashes included). An early-stage frontend scaffold exists in
+`web/` (Vite + React + TypeScript, not yet built out) — see `LIMITATIONS.md`
+for the full list of what's deliberately deferred.

@@ -131,10 +131,15 @@ process (see `SECURITY.md` above). Explicitly still not built:
 
 ## Deployment
 
-No Unichain Sepolia deployment has been executed. Deployment scripts
-(`script/DeployThetaBG.s.sol` etc.) have not been written yet either — this
-was an explicit scope decision for this pass (contracts and their test
-coverage first, deployment once an RPC URL and deployer key are available).
+**Resolved — deployed and verified live on Unichain Sepolia.** See
+`DEPLOYMENT.md` for addresses, verified contract links, and a real,
+on-chain, production-threshold sandwich detection + slash (transaction
+hashes included, not just log output) — the earlier "not yet deployed"
+limitation no longer applies. What deployment did *not* cover: the
+flash-liquidity-at-slash and any other unresolved findings above are still
+unresolved on this live deployment too, since deploying doesn't fix them —
+anyone interacting with this specific instance is exposed to exactly the
+gaps documented in this file and in `SECURITY.md`.
 
 ## Frontend
 
