@@ -78,6 +78,9 @@ contract ThetaBGAdversarialTest is Test, Deployers {
         lpRouter.modifyLiquidity(
             poolKey, ModifyLiquidityParams({tickLower: -6000, tickUpper: 6000, liquidityDelta: 1_000e18, salt: 0})
         );
+        // Mature the seed liquidity before any test's swaps run -- see
+        // LPInsuranceVault.LIQUIDITY_MATURATION_BLOCKS.
+        vm.roll(block.number + 1);
     }
 
     function _newSearcher() internal returns (ActorRouter r) {
@@ -201,7 +204,7 @@ contract ThetaBGAdversarialTest is Test, Deployers {
     /// holding duration. This is the exact risk documented in SECURITY.md
     /// §"LP" / LIMITATIONS.md — verified concretely here, not just asserted
     /// in prose.
-    function test_attack_flashLiquidityAtSlash_capturesShareDespiteInstantExit() public {
+    function test_attack_flashLiquidityAtSlash_noLongerCapturesShareDespiteInstantExit() public {
         PoolId poolId = poolKey.toId();
         LPInsuranceVault vault = hook.vaults(poolId);
 
@@ -230,11 +233,15 @@ contract ThetaBGAdversarialTest is Test, Deployers {
         uint256 flashLPClaimable = vault.claimable(address(flashLP), -6000, 6000, bytes32(0));
         uint256 honestLPClaimable = vault.claimable(address(lpRouter), -6000, 6000, bytes32(0));
 
-        assertGt(flashLPClaimable, 0, "VERIFIED: flash liquidity captured a share of a slash it was exposed to for one block");
-        // With equal liquidity at slash time, they split it evenly — the
-        // flash-LP's zero holding *duration* earned exactly as much as the
-        // honest LP's ongoing position, for this one slash.
-        assertApproxEqAbs(flashLPClaimable, honestLPClaimable, 2);
+        // FIXED: liquidity added and removed within the same block as a
+        // slash never matures (LIQUIDITY_MATURATION_BLOCKS), so it counts
+        // toward neither the slash's divisor nor its own reward-debt
+        // checkpoint. The flash-LP is entitled to nothing from this slash.
+        assertEq(flashLPClaimable, 0, "flash liquidity must earn zero share of a slash it was never matured for");
+        // The honest LP, who had liquidity in since setUp (matured well
+        // before this block), still gets the entire slash to themselves --
+        // the flash-LP's presence didn't dilute their share at all.
+        assertGt(honestLPClaimable, 0, "the honest LP must still receive their earned share");
     }
 
     // ════════════════════════════════════════════════════════════════════

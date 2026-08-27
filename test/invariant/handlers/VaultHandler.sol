@@ -63,11 +63,10 @@ contract VaultHandler is Test {
 
     function addLiquidity(uint256 seed, uint64 amount) public {
         LPRouter r = _lp(seed);
-        uint256 delta = (uint256(amount) % 1000e18) + 1e15;
+        int256 delta = int256((uint256(amount) % 1000e18) + 1e15);
 
-        (uint128 liquidityBefore,,) = manager.getPositionInfo(poolId, address(r), TICK_LOWER, TICK_UPPER, bytes32(0));
-        r.modifyLiquidity(key, ModifyLiquidityParams(TICK_LOWER, TICK_UPPER, int256(delta), bytes32(0)));
-        vault.checkpoint(address(r), TICK_LOWER, TICK_UPPER, bytes32(0), liquidityBefore);
+        r.modifyLiquidity(key, ModifyLiquidityParams(TICK_LOWER, TICK_UPPER, delta, bytes32(0)));
+        vault.checkpoint(address(r), TICK_LOWER, TICK_UPPER, bytes32(0), delta);
     }
 
     function removeLiquidity(uint256 seed, uint64 amount) public {
@@ -75,9 +74,9 @@ contract VaultHandler is Test {
         (uint128 liquidity,,) = manager.getPositionInfo(poolId, address(r), TICK_LOWER, TICK_UPPER, bytes32(0));
         if (liquidity == 0) return;
 
-        uint256 toRemove = (uint256(amount) % liquidity) + 1;
-        r.modifyLiquidity(key, ModifyLiquidityParams(TICK_LOWER, TICK_UPPER, -int256(toRemove), bytes32(0)));
-        vault.checkpoint(address(r), TICK_LOWER, TICK_UPPER, bytes32(0), liquidity);
+        int256 delta = -int256((uint256(amount) % liquidity) + 1);
+        r.modifyLiquidity(key, ModifyLiquidityParams(TICK_LOWER, TICK_UPPER, delta, bytes32(0)));
+        vault.checkpoint(address(r), TICK_LOWER, TICK_UPPER, bytes32(0), delta);
     }
 
     function slash(uint64 amount) public {
@@ -85,6 +84,17 @@ contract VaultHandler is Test {
         vm.deal(address(this), value);
         vault.receiveSlash{value: value}();
         ghost_totalFunded += value;
+    }
+
+    /// @notice Forge's default invariant fuzzer never advances block.number
+    /// on its own -- every call in a run would otherwise land in the same
+    /// block, meaning newly-added liquidity could never mature past
+    /// LIQUIDITY_MATURATION_BLOCKS and the reward-distribution logic this
+    /// suite exists to exercise would never actually run. Included as a
+    /// fuzzable action so block advancement is interleaved with everything
+    /// else in random order, not a fixed pre/post-processing step.
+    function advanceBlock(uint8 numBlocks) public {
+        vm.roll(block.number + (uint256(numBlocks) % 5) + 1);
     }
 
     function claim(uint256 seed) public {

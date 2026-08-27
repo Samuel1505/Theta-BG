@@ -48,7 +48,6 @@ contract ThetaBGHook is IHooks {
     error NotPoolManager();
     error NotProtocolFeeRecipient();
     error ZeroValue();
-    error InvalidLiquidityDelta();
 
     event PoolInsuranceVaultDeployed(PoolId indexed poolId, address vault);
     event PriorityFeeCollected(PoolId indexed poolId, address indexed searcher, Currency currency, uint256 amount);
@@ -418,18 +417,15 @@ contract ThetaBGHook is IHooks {
         emit SandwichSlashed(poolId, searcher, victim, amountSlashed, protocolCut, insuranceCut);
     }
 
+    /// @notice Forwards the exact signed liquidity delta to the pool's
+    /// vault on every add/remove — the vault tracks eligible-vs-pending
+    /// liquidity per position entirely from these deltas (see
+    /// LPInsuranceVault.sol), so no `liquidityBefore` computation belongs
+    /// here anymore; the vault derives everything it needs from the delta
+    /// itself.
     function _checkpoint(PoolKey calldata key, address owner, ModifyLiquidityParams calldata params) private {
         PoolId poolId = key.toId();
-        (uint128 liquidityAfter,,) =
-            poolManager.getPositionInfo(poolId, owner, params.tickLower, params.tickUpper, params.salt);
-
-        int256 liquidityBeforeSigned = int256(uint256(liquidityAfter)) - params.liquidityDelta;
-        if (liquidityBeforeSigned < 0 || liquidityBeforeSigned > int256(uint256(type(uint128).max))) {
-            revert InvalidLiquidityDelta();
-        }
-        uint128 liquidityBefore = uint128(uint256(liquidityBeforeSigned));
-
-        vaults[poolId].checkpoint(owner, params.tickLower, params.tickUpper, params.salt, liquidityBefore);
+        vaults[poolId].checkpoint(owner, params.tickLower, params.tickUpper, params.salt, params.liquidityDelta);
     }
 
     function _settleCurrency(Currency currency, uint256 amount) private {

@@ -76,26 +76,45 @@ contract LPInsuranceVaultTest is Test, Deployers, IUnlockCallback {
 
     /// @notice Mirrors exactly what ThetaBGHook.afterAddLiquidity/
     /// afterRemoveLiquidity does: modify liquidity, then checkpoint the
-    /// position with its liquidity *before* this change. These pools have
+    /// position with the exact signed delta just applied. These pools have
     /// no hook attached (hooks=address(0), since we're testing the vault in
     /// isolation from ThetaBGHook), so nothing calls `checkpoint`
     /// automatically — the test must do it, exactly like the hook would.
+    ///
+    /// Rolls one block forward afterward so the position is *mature*
+    /// (LIQUIDITY_MATURATION_BLOCKS has elapsed) by the time the caller's
+    /// next statement runs — what essentially every test using this helper
+    /// actually wants (a normal LP whose liquidity is eligible to earn).
+    /// The handful of tests that specifically need same-block/immature
+    /// behavior use `_addLiquidityNoRoll`/`_addLiquidityForNoRoll` instead.
     function _addLiquidity(int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt) internal {
+        _addLiquidityNoRoll(tickLower, tickUpper, liquidityDelta, salt);
+        vm.roll(block.number + 1);
+    }
+
+    function _addLiquidityNoRoll(int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt) internal {
         manager.unlock(
             abi.encode(CallbackData(poolKey, ModifyLiquidityParams(tickLower, tickUpper, liquidityDelta, salt)))
         );
-        (uint128 liquidityAfter,,) = manager.getPositionInfo(poolId, address(this), tickLower, tickUpper, salt);
-        int256 beforeSigned = int256(uint256(liquidityAfter)) - liquidityDelta;
-        vault.checkpoint(address(this), tickLower, tickUpper, salt, uint128(uint256(beforeSigned)));
+        vault.checkpoint(address(this), tickLower, tickUpper, salt, liquidityDelta);
     }
 
     function _addLiquidityFor(LPRouter router, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)
         internal
     {
+        _addLiquidityForNoRoll(router, tickLower, tickUpper, liquidityDelta, salt);
+        vm.roll(block.number + 1);
+    }
+
+    function _addLiquidityForNoRoll(
+        LPRouter router,
+        int24 tickLower,
+        int24 tickUpper,
+        int256 liquidityDelta,
+        bytes32 salt
+    ) internal {
         router.modifyLiquidity(poolKey, ModifyLiquidityParams(tickLower, tickUpper, liquidityDelta, salt));
-        (uint128 liquidityAfter,,) = manager.getPositionInfo(poolId, address(router), tickLower, tickUpper, salt);
-        int256 beforeSigned = int256(uint256(liquidityAfter)) - liquidityDelta;
-        vault.checkpoint(address(router), tickLower, tickUpper, salt, uint128(uint256(beforeSigned)));
+        vault.checkpoint(address(router), tickLower, tickUpper, salt, liquidityDelta);
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
@@ -636,16 +655,27 @@ contract LPInsuranceVaultTest is Test, Deployers, IUnlockCallback {
     }
 
     function test_repeatedAddThenRemove_sameBlock_accountingStaysConsistent() public {
-        _addLiquidity(TICK_LOWER, TICK_UPPER, 1000e18, 0);
-        _addLiquidity(TICK_LOWER, TICK_UPPER, 500e18, 0);
-        _addLiquidity(TICK_LOWER, TICK_UPPER, -700e18, 0);
+        _addLiquidityNoRoll(TICK_LOWER, TICK_UPPER, 1000e18, 0);
+        _addLiquidityNoRoll(TICK_LOWER, TICK_UPPER, 500e18, 0);
+        _addLiquidityNoRoll(TICK_LOWER, TICK_UPPER, -700e18, 0);
 
         (uint128 liquidity,,) = manager.getPositionInfo(poolId, address(this), TICK_LOWER, TICK_UPPER, 0);
-        assertEq(liquidity, 800e18);
+        assertEq(liquidity, 800e18, "actual PoolManager liquidity must reflect all three same-block changes");
 
+        (uint128 eligible, uint128 pending,) = vault.positionLiquidity(address(this), TICK_LOWER, TICK_UPPER, 0);
+        assertEq(eligible, 0, "none of this block's net liquidity has matured yet");
+        assertEq(pending, 800e18, "all of it is still pending, netted correctly across add/add/remove");
+
+        // A same-block slash cannot credit any of it -- it's all still pending.
         _slash(1 ether);
-        uint256 claimable = vault.claimable(address(this), TICK_LOWER, TICK_UPPER, 0);
-        assertApproxEqAbs(claimable, 1 ether, 2);
+        assertEq(vault.claimable(address(this), TICK_LOWER, TICK_UPPER, 0), 0);
+
+        // Once a block passes, the net 800e18 matures and *does* earn from
+        // a subsequent slash — proving the accounting wasn't lost, only
+        // correctly deferred.
+        vm.roll(block.number + 1);
+        _slash(1 ether);
+        assertApproxEqAbs(vault.claimable(address(this), TICK_LOWER, TICK_UPPER, 0), 1 ether, 2);
     }
 
     function test_availableBalance_afterFullWithdrawalByOnlyLP_remainsClaimableNotStuck() public {

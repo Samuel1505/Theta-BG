@@ -111,6 +111,10 @@ contract ThetaBGHookTest is Test, Deployers {
         lpRouter.modifyLiquidity(
             poolKey, ModifyLiquidityParams({tickLower: -6000, tickUpper: 6000, liquidityDelta: 1_000e18, salt: 0})
         );
+        // Mature the seed liquidity before any test's swaps run, so it's
+        // eligible for whatever slash a test triggers — see
+        // LPInsuranceVault.LIQUIDITY_MATURATION_BLOCKS.
+        vm.roll(block.number + 1);
 
         searcherRouter = new ActorRouter(manager);
         victimRouter = new ActorRouter(manager);
@@ -911,6 +915,10 @@ contract ThetaBGHookTest is Test, Deployers {
         lp2.modifyLiquidity(
             poolKey, ModifyLiquidityParams({tickLower: -6000, tickUpper: 6000, liquidityDelta: 1_000e18, salt: 0})
         );
+        // Mature lp2's liquidity before the slash -- this test's point is an
+        // even split between two equally-*matured* positions, not a flash
+        // deposit, which is covered separately by the adversarial suite.
+        vm.roll(block.number + 1);
 
         _executeSandwich(searcherRouter, victimRouter, poolKey);
 
