@@ -8,13 +8,6 @@ Built for **UHI10 — Sustainable Liquidity & MEV Protection**.
 > Sandwich me and lose your bond — and that bond becomes LP yield,
 > automatically, on-chain, in the same block.
 
-This repository is a from-scratch, senior-engineering-reviewed
-implementation, not a direct transcription of the original pitch document
-(`Theta-BG.md`). Several of that document's mechanism claims did not survive
-contact with actual Uniswap v4 / EVM semantics and were corrected — read
-`V4_ARCHITECTURE_VALIDATION.md` first if you're comparing this code against
-the original pitch.
-
 ---
 
 ## The problem
